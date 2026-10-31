@@ -1,15 +1,15 @@
 #include <ST77916_QSPI_GFX.h>
 
-// Working wiring from the bring-up:
-// LCD SCL -> GPIO17
-// LCD IO0 -> GPIO16
-// LCD IO1 -> GPIO15
-// LCD IO2 -> GPIO14
-// LCD IO3 -> GPIO13
-// LCD RST -> GPIO18
-// LCD CS  -> GPIO21
-// LCD BL  -> GPIO5
-ST77916_QSPI_GFX tft(17, 16, 15, 14, 13, 18, 21, 5);
+#define TFT_SCLK 17
+#define TFT_IO0  16
+#define TFT_IO1  15
+#define TFT_IO2  14
+#define TFT_IO3  13
+#define TFT_RST  18
+#define TFT_CS   21
+#define TFT_BL   5
+
+ST77916_QSPI_GFX tft(TFT_SCLK, TFT_IO0, TFT_IO1, TFT_IO2, TFT_IO3, TFT_RST, TFT_CS, TFT_BL);
 
 void setup() {
   Serial.begin(115200);

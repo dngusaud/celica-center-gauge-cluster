@@ -1,122 +1,78 @@
 #include <Arduino.h>
-#include <esp_timer.h>
-#include <SwitecX25.h>
+#include <ST77916_QSPI_GFX.h>
+// #include <ST77916_QSPI.h>
+#include <SPI.h>
+#include <SD.h>
 
-// Change these pins to your wiring
-#define PIN1 4
-#define PIN2 5
-#define PIN3 6
-#define PIN4 7
-#define ADC_1_PIN 9
+// Pin definitions for the SD card
+#define SD_SCK  10
+#define SD_MISO 12
+#define SD_MOSI 11
+#define SD_CS   3
 
-// Handler
-esp_timer_handle_t guage_update_timer;
-QueueHandle_t adc_1_queue;
+// Pin definitions for the ST77916 display
+#define TFT_SCLK 17
+#define TFT_IO0  16
+#define TFT_IO1  15
+#define TFT_IO2  14
+#define TFT_IO3  13
+#define TFT_RST  18
+#define TFT_CS   21
+#define TFT_BL   5
 
+// Create instances of the display and SD card SPI interface
+ST77916_QSPI_GFX tft(TFT_SCLK, TFT_IO0, TFT_IO1, TFT_IO2, TFT_IO3, TFT_RST, TFT_CS, TFT_BL);
+SPIClass sdSPI(FSPI);
 
-// Constants
-const int TOTAL_STEPS = 945; // 945 for 315 deg, 600 for 200 deg, 300 for 100 deg 
-const int adc_1_SAMPLE_HZ = 500;
-const int GAUGE_STEP_THRESHOLD = 3; // Minimum step change to update gauge position
+void sd_setup() {
+  delay(1000); // Wait for Serial to initialize
+  Serial.print("Initializing SD card...");
+  sdSPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
 
-volatile int targetPosition = 0;
-
-// X25 stepper: typically 315 degrees × 3 steps/degree
-SwitecX25 gauge(TOTAL_STEPS, PIN1, PIN2, PIN3, PIN4);
-
-
-void gaugeTimerCallback(void *arg)
-{
-    gauge.update();
+  if (!SD.begin(SD_CS, sdSPI, 20000000)){
+      Serial.println("SD card initialisation failed");
+  }
+  else{
+      Serial.println("SD card ready");
+  }
 }
 
+void tft_setup() {
+  delay(1000); // Wait for Serial to initialize
 
-void read_adc_1(void *pvParameters)
-{
-    int adc_1 = 0;
-    int increment = 1;
-    while (1)
-    {
-        adc_1 = analogRead(ADC_1_PIN);
-        xQueueOverwrite(adc_1_queue, &adc_1);
-        vTaskDelay(pdMS_TO_TICKS(1000/adc_1_SAMPLE_HZ));
-    }
+  if (!tft.begin(70000000)) {
+    Serial.println("ST77916 begin failed");
+    while (true) delay(1000);
+  }
+  else{
+    Serial.println("ST77916 begin success");
+  }
+  tft.setTextWrap(false);
 }
 
-void update_gauge_position(void *pvParameters)
-{
-    int adc_1_1 = 0;
-    float filtered_adc_1_1 = 0.0f;
-    bool filterInitialized = false;
-    const float alpha = 0.01f; 
-    
-    while (1)
-    {
-        if (xQueueReceive(adc_1_queue, &adc_1_1, portMAX_DELAY) == pdTRUE)
-        {
-            // Apply low-pass filter to the raw target position
-            if (!filterInitialized) {
-                filtered_adc_1_1 = adc_1_1;
-                filterInitialized = true;
-            } else {
-                filtered_adc_1_1 += alpha * (adc_1_1 - filtered_adc_1_1);
-            }
+void tft_test(){
+  // Fill the screen with red, green, and blue colors, displaying each for 400 milliseconds
+  tft.fillScreen(ST77916_RED);
+  tft.display();
+  delay(400);
 
-            // Map the adc 1 reading to the gauge's position
-            targetPosition = map(filtered_adc_1_1, 0, 4095, 0, TOTAL_STEPS);
-            
-            // Only update the gauge position if the change exceeds the threshold
-            if (abs(static_cast<int>(gauge.currentStep) - targetPosition) >= GAUGE_STEP_THRESHOLD)
-            {
-                gauge.setPosition(targetPosition);
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(1));
-    }
+  tft.fillScreen(ST77916_GREEN);
+  tft.display();
+  delay(400);
+
+  tft.fillScreen(ST77916_BLUE);
+  tft.display();
+  delay(400);
 }
 
-void setup()
-{
-    Serial.begin(115200);
-    analogReadResolution(12);
-    pinMode(ADC_1_PIN, INPUT);
-
-    adc_1_queue = xQueueCreate(1, sizeof(int));
-    
-    gauge.zero();
-    gauge.setPosition(0);
-
-
-    esp_timer_create_args_t timerArgs = {};
-    timerArgs.callback = &gaugeTimerCallback;
-    timerArgs.name = "gauge_update";
-
-    esp_timer_create(&timerArgs, &guage_update_timer);
-
-    // 100 microseconds = 10 kHz
-    esp_timer_start_periodic(guage_update_timer, 100);
-
-    xTaskCreate(
-        read_adc_1,
-        "Read ADC 1",
-        2048,
-        NULL,
-        1,
-        NULL
-    );
-
-    xTaskCreate(
-        update_gauge_position,
-        "Update Gauge Position",
-        2048,
-        NULL,
-        1,
-        NULL
-    );
-
+void setup() {
+  Serial.begin(115200);
+  
+  tft_setup();
+  sd_setup();
 }
 
-void loop()
-{
-    vTaskDelay(pdMS_TO_TICKS(1000));
+void loop() {
+  tft_test();
 }
+  

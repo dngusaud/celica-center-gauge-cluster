@@ -2,12 +2,12 @@
 #include <SPI.h>
 #include <SD.h>
 
-SPIClass sdSPI(FSPI);
+#define SD_SCK  10
+#define SD_MISO 12
+#define SD_MOSI 11
+#define SD_CS   3
 
-constexpr int SD_SCK  = 10;
-constexpr int SD_MISO = 12;
-constexpr int SD_MOSI = 11;
-constexpr int SD_CS   = 3;
+SPIClass sdSPI(FSPI);
 
 void setup()
 {
