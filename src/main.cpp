@@ -1,6 +1,6 @@
 #include <Arduino.h>
-#include <ST77916_QSPI_GFX.h>
-// #include <ST77916_QSPI.h>
+#include <ST77916_QSPI.h>
+#include <AnimatedGIF.h>
 #include <SPI.h>
 #include <SD.h>
 
@@ -68,8 +68,8 @@ void tft_test(){
 void setup() {
   Serial.begin(115200);
   
-  tft_setup();
   sd_setup();
+  tft_setup();
 }
 
 void loop() {
