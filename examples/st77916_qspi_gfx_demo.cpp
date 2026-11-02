@@ -1,4 +1,4 @@
-#include <ST77916_QSPI_GFX.h>
+#include <ST77916_QSPI.h>
 
 #define TFT_SCLK 17
 #define TFT_IO0  16
@@ -14,12 +14,17 @@ ST77916_QSPI_GFX tft(TFT_SCLK, TFT_IO0, TFT_IO1, TFT_IO2, TFT_IO3, TFT_RST, TFT_
 void setup() {
   Serial.begin(115200);
   delay(1000);
+  ST77916_QSPI_GFX::Config cfg;
+  cfg.host = SPI2_HOST;
+  cfg.pushTask = false;                   // transmit on the other core
 
-  if (!tft.begin(70000000)) {
-    Serial.println("ST77916 begin failed");
+  if (!tft.begin(cfg)) {
+    Serial.printf("TFT error: %s\n", tft.lastError());
     while (true) delay(1000);
   }
-
+  else{
+    Serial.printf("display %dx%d\n", tft.PANEL_W, tft.PANEL_H);
+  }
   tft.setTextWrap(false);
 }
 

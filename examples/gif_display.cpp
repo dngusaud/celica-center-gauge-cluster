@@ -24,7 +24,7 @@
 // Create instances of the display and SD card SPI interface
 ST77916_QSPI_GFX tft(TFT_SCLK, TFT_IO0, TFT_IO1, TFT_IO2, TFT_IO3, TFT_RST, TFT_CS, TFT_BL);
 AnimatedGIF gif;
-SPIClass sdSPI(HSPI);
+SPIClass sdSPI(HSPI); // HSPI is used for the SD card to avoid conflicts with the display's QSPI interface
 
 static File gifFile;
 static int16_t offX = 0, offY = 0;
@@ -138,7 +138,6 @@ void tft_test(){
 void setup() {
     Serial.begin(115200);
     delay(1000);
-
 
     sd_setup();
     tft_setup();
