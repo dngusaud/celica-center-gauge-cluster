@@ -1,9 +1,10 @@
 /*
-  This is a simple test sketch to check if PSRAM 
-  is available on the ESP32-S3 board. 
+  This is a simple test sketch to check if PSRAM is available on the ESP32-S3 board. 
   It initializes the serial communication and checks the size of the PSRAM. 
   If PSRAM is available, it prints the size in bytes; otherwise, 
   it indicates that no PSRAM was found.
+
+  Run this test if "framebuffer allocation failed" error occurs during initialization.
 
   NOTE: if you are using platoformio, make sure to set the following options to enable PSRAM:
   board_build.arduino.memory_type = qio_opi

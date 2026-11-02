@@ -28,20 +28,22 @@ SPIClass sdSPI(HSPI);
 
 static File gifFile;
 static int16_t offX = 0, offY = 0;
+static uint32_t drawUsAccum = 0;   // time spent inside GIFDraw/pushImage8
 
 // ---- the integration ---------------------------------------------------------
 static void GIFDraw(GIFDRAW *pDraw) {
   const int16_t y = (int16_t)(offY + pDraw->iY + pDraw->y);
   const int16_t x = (int16_t)(offX + pDraw->iX);
 
-  // On the first line of a frame that asked for it, clear to the background.
   if (pDraw->y == 0 && pDraw->ucDisposalMethod == 2)
     tft.fillRect(offX, offY, pDraw->iWidth, pDraw->iHeight, ST77916_BLACK);
 
+  const uint32_t t0 = micros();
   tft.pushImage8(x, y, pDraw->iWidth, 1,
                  pDraw->pPixels, pDraw->pPalette,
                  pDraw->ucHasTransparency ? (int16_t)pDraw->ucTransparent : (int16_t)-1,
                  ST77916_PIXELS_BE);
+  drawUsAccum += micros() - t0;
 }
 
 // ---- file callbacks ----------------------------------------------------------
@@ -51,10 +53,12 @@ static void *gifOpen(const char *fname, int32_t *pSize) {
   *pSize = gifFile.size();
   return (void *)&gifFile;
 }
+
 static void gifClose(void *handle) {
   File *f = static_cast<File *>(handle);
   if (f) f->close();
 }
+
 static int32_t gifRead(GIFFILE *pFile, uint8_t *pBuf, int32_t iLen) {
   File *f = static_cast<File *>(pFile->fHandle);
   const int32_t avail = pFile->iSize - pFile->iPos;
@@ -63,6 +67,7 @@ static int32_t gifRead(GIFFILE *pFile, uint8_t *pBuf, int32_t iLen) {
   pFile->iPos = f->position();
   return got;
 }
+
 static int32_t gifSeek(GIFFILE *pFile, int32_t iPosition) {
   File *f = static_cast<File *>(pFile->fHandle);
   f->seek(iPosition);
@@ -72,43 +77,64 @@ static int32_t gifSeek(GIFFILE *pFile, int32_t iPosition) {
 
 static void playGif(const char *path) {
   if (!gif.open(path, gifOpen, gifClose, gifRead, gifSeek, GIFDraw)) {
-    Serial.printf("cannot open %s (err %d)\n", path, gif.getLastError());
+     Serial.printf("cannot open %s (err %d)\n", path, gif.getLastError());
     return;
   }
   offX = (int16_t)((tft.PANEL_W - gif.getCanvasWidth())  / 2);
   offY = (int16_t)((tft.PANEL_H - gif.getCanvasHeight()) / 2);
   Serial.printf("%s  %dx%d\n", path, gif.getCanvasWidth(), gif.getCanvasHeight());
 
-  tft.fillScreen(ST77916_BLACK);
-  tft.displayFull();
 
   int delayMs = 0;
-  while (gif.playFrame(false, &delayMs)) {
-    tft.display();                       // only the dirty region goes out
-    if (delayMs > 0) delay(delayMs);
+  uint32_t frames = 0, logT0 = millis();
+  uint32_t playSum = 0, pushSum = 0, drawSum = 0;
+
+  while (true) {
+    drawUsAccum = 0;
+    const uint32_t t0 = micros();
+    int rc = gif.playFrame(false, &delayMs);
+    if (rc < 0) break;
+    const uint32_t playUs = micros() - t0;          // decode + GIFDraw
+    tft.display();
+    const uint32_t pushUs = micros() - t0 - playUs; // panel transfer only
+    const uint32_t workUs = playUs + pushUs;
+
+    const int32_t remainMs = delayMs - (int32_t)(workUs / 1000);
+    if (remainMs > 0) delay(remainMs);
+
+    frames++;
+    playSum += playUs;
+    pushSum += pushUs;
+    drawSum += drawUsAccum;
+    if (millis() - logT0 >= 2000) {
+      const float n = frames;
+      Serial.printf("fps=%.1f  play=%.1f  draw=%.1f  push=%.1f  (ms)\n",
+                    frames * 1000.0f / (millis() - logT0),
+                    playSum / 1000.0f / n,
+                    drawSum / 1000.0f / n,
+                    pushSum / 1000.0f / n);
+      frames = 0; playSum = 0; pushSum = 0; drawSum = 0; logT0 = millis();
+    }
   }
-  gif.close();
 }
 
 void sd_setup() {
-  delay(1000); // Wait for Serial to initialize
+  delay(1000); // Wait for  Serial to initialize
   Serial.print("Initializing SD card...");
   sdSPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
 
-  if (!SD.begin(SD_CS, sdSPI)) {
-      Serial.println("SD card initialisation failed");
+  if (!SD.begin(SD_CS, sdSPI, 4000000)) {
+       Serial.println("SD card initialisation failed");
       while (true) {delay(1000);}
   }
   else{
-      Serial.println("SD card ready");
+       Serial.println("SD card ready");
   }
 }
 
 void tft_setup() {
-  delay(1000); // Wait for Serial to initialize
-
   ST77916_QSPI_GFX::Config cfg;
-  cfg.host = SPI2_HOST;
+  cfg.clockHz = 70000000;                 // 70 MHz
   cfg.pushTask = false;                   // transmit on the other core
 
   if (!tft.begin(cfg)) {
@@ -120,26 +146,9 @@ void tft_setup() {
   }
 }
 
-void tft_test(){
-  // Fill the screen with red, green, and blue colors, displaying each for 400 milliseconds
-  tft.fillScreen(ST77916_RED);
-  tft.display();
-  delay(400);
-
-  tft.fillScreen(ST77916_GREEN);
-  tft.display();
-  delay(400);
-
-  tft.fillScreen(ST77916_BLUE);
-  tft.display();
-  delay(400);
-}
 
 void setup() {
     Serial.begin(115200);
-    delay(1000);
-
-
     sd_setup();
     tft_setup();
 
