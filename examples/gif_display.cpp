@@ -1,28 +1,17 @@
-// Animated GIF playback.
-//
-// Needs bitbank2's AnimatedGIF library (Library Manager: "AnimatedGIF").
-//
-// The whole integration is the GIFDraw callback below. AnimatedGIF hands over
-// one line at a time as 8-bit palette indices plus an RGB565 palette; ask it
-// for a big-endian palette and pushImage8 writes straight into the framebuffer
-// with no per-pixel conversion at all.
-//
-// Put .gif files on an SD card. Anything up to 360x360 plays centred.
-
+#include <Arduino.h>
 #include <ST77916_QSPI.h>
 #include <AnimatedGIF.h>
-#include <SD.h>
 #include <SPI.h>
+#include <SD.h>
+#include "esp_heap_caps.h"
 
-// SD card on its own SPI bus (adjust to your carrier board)
+// Pin definitions for the SD card
 #define SD_SCK  10
 #define SD_MISO 12
 #define SD_MOSI 11
 #define SD_CS   3
 
-// ---- wiring ------------------------------------------------------------
-// Edit these to match your board. Any ESP32-S3 with a free QSPI bus (4 data
-// lines) plus RST/CS/BL pins works; only the numbers change.
+// Pin definitions for the ST77916 display
 #define TFT_SCLK 17
 #define TFT_IO0  16
 #define TFT_IO1  15
@@ -32,7 +21,7 @@
 #define TFT_CS   21
 #define TFT_BL   5
 
-
+// Create instances of the display and SD card SPI interface
 ST77916_QSPI_GFX tft(TFT_SCLK, TFT_IO0, TFT_IO1, TFT_IO2, TFT_IO3, TFT_RST, TFT_CS, TFT_BL);
 AnimatedGIF gif;
 SPIClass sdSPI(HSPI);
@@ -101,25 +90,62 @@ static void playGif(const char *path) {
   gif.close();
 }
 
-void setup() {
-  Serial.begin(115200);
-  delay(1000);
+void sd_setup() {
+  delay(1000); // Wait for Serial to initialize
+  Serial.print("Initializing SD card...");
+  sdSPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+
+  if (!SD.begin(SD_CS, sdSPI)) {
+      Serial.println("SD card initialisation failed");
+      while (true) {delay(1000);}
+  }
+  else{
+      Serial.println("SD card ready");
+  }
+}
+
+void tft_setup() {
+  delay(1000); // Wait for Serial to initialize
 
   ST77916_QSPI_GFX::Config cfg;
-  cfg.pushTask = true;                   // transmit on the other core
+  cfg.host = SPI2_HOST;
+  cfg.pushTask = false;                   // transmit on the other core
+
   if (!tft.begin(cfg)) {
-    Serial.printf("display begin failed: %s\n", tft.lastError());
+    Serial.printf("TFT error: %s\n", tft.lastError());
     while (true) delay(1000);
   }
-
-  sdSPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
-  if (!SD.begin(SD_CS, sdSPI)) {
-    Serial.println("SD mount failed");
-    while (true) delay(1000);
+  else{
+    Serial.printf("display %dx%d\n", tft.PANEL_W, tft.PANEL_H);
   }
-
-  gif.begin(GIF_PALETTE_RGB565_BE);      // matches the framebuffer byte order
 }
+
+void tft_test(){
+  // Fill the screen with red, green, and blue colors, displaying each for 400 milliseconds
+  tft.fillScreen(ST77916_RED);
+  tft.display();
+  delay(400);
+
+  tft.fillScreen(ST77916_GREEN);
+  tft.display();
+  delay(400);
+
+  tft.fillScreen(ST77916_BLUE);
+  tft.display();
+  delay(400);
+}
+
+void setup() {
+    Serial.begin(115200);
+    delay(1000);
+
+
+    sd_setup();
+    tft_setup();
+
+    gif.begin(GIF_PALETTE_RGB565_BE);
+}
+
 
 void loop() {
   File root = SD.open("/");
@@ -132,5 +158,4 @@ void loop() {
     }
   }
   root.close();
-  delay(500);
 }
