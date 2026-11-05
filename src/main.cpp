@@ -29,6 +29,11 @@ SPIClass sdSPI(HSPI);
 static File gifFile;
 static int16_t offX = 0, offY = 0;
 static uint32_t drawUsAccum = 0;   // time spent inside GIFDraw/pushImage8
+static uint32_t readUsAccum = 0;   // time spent inside gifRead (SD I/O)
+
+// ---- PSRAM buffers ---------------------------------------------------------
+static uint8_t *gifBuffer = nullptr;
+static size_t gifBufferSize = 0;
 
 // ---- the integration ---------------------------------------------------------
 static void GIFDraw(GIFDRAW *pDraw) {
@@ -48,74 +53,121 @@ static void GIFDraw(GIFDRAW *pDraw) {
 
 // ---- file callbacks ----------------------------------------------------------
 static void *gifOpen(const char *fname, int32_t *pSize) {
-  gifFile = SD.open(fname, FILE_READ);
-  if (!gifFile) return nullptr;
-  *pSize = gifFile.size();
-  return (void *)&gifFile;
+    if (!gifBuffer) return nullptr;
+    *pSize = (int32_t)gifBufferSize;
+    return gifBuffer;
 }
 
 static void gifClose(void *handle) {
-  File *f = static_cast<File *>(handle);
-  if (f) f->close();
+    // Keep GIF in PSRAM for subsequent playback.
 }
 
 static int32_t gifRead(GIFFILE *pFile, uint8_t *pBuf, int32_t iLen) {
-  File *f = static_cast<File *>(pFile->fHandle);
-  const int32_t avail = pFile->iSize - pFile->iPos;
-  if (iLen > avail) iLen = avail;
-  const int32_t got = f->read(pBuf, iLen);
-  pFile->iPos = f->position();
-  return got;
+    uint8_t *buffer = (uint8_t *)pFile->fHandle;
+    int32_t available = pFile->iSize - pFile->iPos;
+
+    if (iLen > available) iLen = available;
+    if (iLen <= 0) return 0;
+
+    memcpy(pBuf, buffer + pFile->iPos, iLen);
+
+    pFile->iPos += iLen;
+
+    return iLen;
 }
 
 static int32_t gifSeek(GIFFILE *pFile, int32_t iPosition) {
-  File *f = static_cast<File *>(pFile->fHandle);
-  f->seek(iPosition);
-  pFile->iPos = (int32_t)f->position();
-  return pFile->iPos;
+    if (iPosition < 0 || iPosition > pFile->iSize)
+        return pFile->iPos;
+
+    pFile->iPos = iPosition;
+
+    return pFile->iPos;
 }
 
 static void playGif(const char *path) {
   if (!gif.open(path, gifOpen, gifClose, gifRead, gifSeek, GIFDraw)) {
-     Serial.printf("cannot open %s (err %d)\n", path, gif.getLastError());
-    return;
+      Serial.printf("cannot open %s (err %d)\n", path, gif.getLastError());
+      return;
   }
-  offX = (int16_t)((tft.PANEL_W - gif.getCanvasWidth())  / 2);
+
+  offX = (int16_t)((tft.PANEL_W - gif.getCanvasWidth()) / 2);
   offY = (int16_t)((tft.PANEL_H - gif.getCanvasHeight()) / 2);
   Serial.printf("%s  %dx%d\n", path, gif.getCanvasWidth(), gif.getCanvasHeight());
 
-
   int delayMs = 0;
   uint32_t frames = 0, logT0 = millis();
-  uint32_t playSum = 0, pushSum = 0, drawSum = 0;
+  uint32_t playSum = 0, pushSum = 0, drawSum = 0, readSum = 0;
 
   while (true) {
     drawUsAccum = 0;
+    readUsAccum = 0;
     const uint32_t t0 = micros();
     int rc = gif.playFrame(false, &delayMs);
     if (rc < 0) break;
-    const uint32_t playUs = micros() - t0;          // decode + GIFDraw
+    const uint32_t playUs = micros() - t0;          // decode + read + GIFDraw
     tft.display();
     const uint32_t pushUs = micros() - t0 - playUs; // panel transfer only
-    const uint32_t workUs = playUs + pushUs;
 
-    const int32_t remainMs = delayMs - (int32_t)(workUs / 1000);
+    const int32_t remainMs = delayMs - (int32_t)(playUs + pushUs) / 1000;
     if (remainMs > 0) delay(remainMs);
 
     frames++;
-    playSum += playUs;
-    pushSum += pushUs;
-    drawSum += drawUsAccum;
+    playSum  += playUs;
+    pushSum  += pushUs;
+    drawSum  += drawUsAccum;
+    readSum  += readUsAccum;
     if (millis() - logT0 >= 2000) {
       const float n = frames;
-      Serial.printf("fps=%.1f  play=%.1f  draw=%.1f  push=%.1f  (ms)\n",
+      // decode = play - read - draw (the pure LZW work)
+      const float decodeUs = (float)playSum - (float)readSum - (float)drawSum;
+      Serial.printf("fps=%.1f  play=%.1f  read=%.1f  decode=%.1f  draw=%.1f  push=%.1f  (ms)\n",
                     frames * 1000.0f / (millis() - logT0),
-                    playSum / 1000.0f / n,
-                    drawSum / 1000.0f / n,
-                    pushSum / 1000.0f / n);
-      frames = 0; playSum = 0; pushSum = 0; drawSum = 0; logT0 = millis();
+                    playSum  / 1000.0f / n,
+                    readSum  / 1000.0f / n,
+                    decodeUs / 1000.0f / n,
+                    drawSum  / 1000.0f / n,
+                    pushSum  / 1000.0f / n);
+      frames = 0; playSum = 0; pushSum = 0; drawSum = 0; readSum = 0; logT0 = millis();
     }
   }
+}
+
+bool loadGifToPSRAM(const char *path) {
+    File file = SD.open(path, FILE_READ);
+
+    if (!file) {
+        Serial.println("Failed to open GIF");
+        return false;
+    }
+
+    gifBufferSize = file.size();
+
+    gifBuffer = (uint8_t *)heap_caps_malloc(
+        gifBufferSize,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+    );
+
+    if (!gifBuffer) {
+        Serial.println("PSRAM allocation failed");
+        file.close();
+        return false;
+    }
+
+    size_t bytesRead = file.read(gifBuffer, gifBufferSize);
+    file.close();
+
+    if (bytesRead != gifBufferSize) {
+        Serial.println("Incomplete GIF read");
+        heap_caps_free(gifBuffer);
+        gifBuffer = nullptr;
+        gifBufferSize = 0;
+        return false;
+    }
+
+    Serial.printf("GIF loaded: %u bytes\n", (unsigned int)gifBufferSize);
+
+    return true;
 }
 
 void sd_setup() {
@@ -123,7 +175,7 @@ void sd_setup() {
   Serial.print("Initializing SD card...");
   sdSPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
 
-  if (!SD.begin(SD_CS, sdSPI, 4000000)) {
+  if (!SD.begin(SD_CS, sdSPI, 40000000)) { // 40 MHz
        Serial.println("SD card initialisation failed");
       while (true) {delay(1000);}
   }
@@ -135,7 +187,7 @@ void sd_setup() {
 void tft_setup() {
   ST77916_QSPI_GFX::Config cfg;
   cfg.clockHz = 70000000;                 // 70 MHz
-  cfg.pushTask = false;                   // transmit on the other core
+  cfg.pushTask = true;                   // transmit on the other core
 
   if (!tft.begin(cfg)) {
     Serial.printf("TFT error: %s\n", tft.lastError());
@@ -146,25 +198,20 @@ void tft_setup() {
   }
 }
 
-
 void setup() {
     Serial.begin(115200);
     sd_setup();
     tft_setup();
 
     gif.begin(GIF_PALETTE_RGB565_BE);
+
+  if (!loadGifToPSRAM("/30fps.gif")) {
+      Serial.println("GIF loading failed");
+      while (true) delay(1000);
+  }
 }
 
 
 void loop() {
-  File root = SD.open("/");
-  while (File entry = root.openNextFile()) {
-    String name = entry.name();
-    entry.close();
-    if (name.endsWith(".gif") || name.endsWith(".GIF")) {
-      String path = name.startsWith("/") ? name : ("/" + name);
-      playGif(path.c_str());
-    }
-  }
-  root.close();
+    playGif("/30fps.gif");
 }
