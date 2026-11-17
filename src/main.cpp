@@ -35,7 +35,70 @@ static uint32_t readUsAccum = 0;   // time spent inside gifRead (SD I/O)
 static uint8_t *gifBuffer = nullptr;
 static size_t gifBufferSize = 0;
 
-// ---- the integration ---------------------------------------------------------
+
+// ---- Set up functions ----------------------------------------------------------
+void sd_setup() {
+  delay(1000); // Wait for  Serial to initialize
+  Serial.print("Initializing SD card...");
+  sdSPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+
+  if (!SD.begin(SD_CS, sdSPI, 40000000)) { // 40 MHz
+       Serial.println("SD card initialisation failed");
+      while (true) {delay(1000);}
+  }
+  else{
+       Serial.println("SD card ready");
+  }
+}
+
+void tft_setup() {
+  ST77916_QSPI_GFX::Config cfg;
+  cfg.clockHz = 40000000;                 // 40 MHz
+  cfg.pushTask = false;                   // keep this false, otherwise screen flickers
+  cfg.doubleBuffer = true;
+
+  if (!tft.begin(cfg)) {
+    Serial.printf("TFT error: %s\n", tft.lastError());
+    while (true) delay(1000);
+  }
+  else{
+    Serial.printf("display %dx%d\n", tft.PANEL_W, tft.PANEL_H);
+  }
+}
+
+bool loadGifToPSRAM(const char *path) {
+  File file = SD.open(path, FILE_READ);
+
+  // Check if the file was opened successfully
+  if (!file) {
+      Serial.println("Failed to open GIF");
+      return false;
+  }
+
+  // Get the size of the GIF and allocate memory in PSRAM
+  gifBufferSize = file.size();
+  gifBuffer = (uint8_t *)heap_caps_malloc(gifBufferSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!gifBuffer) {
+      Serial.println("PSRAM allocation failed");
+      file.close();
+      return false;
+  }
+  // Read and copy the GIF data into the PSRAM buffer
+  size_t bytesRead = file.read(gifBuffer, gifBufferSize);
+  file.close();
+
+  // Check if the entire GIF was read successfully
+  if (bytesRead != gifBufferSize) {
+      Serial.println("Incomplete GIF read");
+      heap_caps_free(gifBuffer);
+      gifBuffer = nullptr;
+      gifBufferSize = 0;
+      return false;
+  }
+  Serial.printf("GIF loaded: %u bytes\n", (unsigned int)gifBufferSize);
+  return true;
+}
+
 static void GIFDraw(GIFDRAW *pDraw) {
   const int16_t y = (int16_t)(offY + pDraw->iY + pDraw->y);
   const int16_t x = (int16_t)(offX + pDraw->iX);
@@ -45,17 +108,16 @@ static void GIFDraw(GIFDRAW *pDraw) {
 
   const uint32_t t0 = micros();
   tft.pushImage8(x, y, pDraw->iWidth, 1,
-                 pDraw->pPixels, pDraw->pPalette,
-                 pDraw->ucHasTransparency ? (int16_t)pDraw->ucTransparent : (int16_t)-1,
-                 ST77916_PIXELS_BE);
+                pDraw->pPixels, pDraw->pPalette,
+                pDraw->ucHasTransparency ? (int16_t)pDraw->ucTransparent : (int16_t)-1,
+                ST77916_PIXELS_BE);
   drawUsAccum += micros() - t0;
 }
 
-// ---- file callbacks ----------------------------------------------------------
 static void *gifOpen(const char *fname, int32_t *pSize) {
-    if (!gifBuffer) return nullptr;
-    *pSize = (int32_t)gifBufferSize;
-    return gifBuffer;
+  if (!gifBuffer) return nullptr;
+  *pSize = (int32_t)gifBufferSize;
+  return gifBuffer;
 }
 
 static void gifClose(void *handle) {
@@ -63,26 +125,26 @@ static void gifClose(void *handle) {
 }
 
 static int32_t gifRead(GIFFILE *pFile, uint8_t *pBuf, int32_t iLen) {
-    uint8_t *buffer = (uint8_t *)pFile->fHandle;
-    int32_t available = pFile->iSize - pFile->iPos;
+  uint8_t *buffer = (uint8_t *)pFile->fHandle;
+  int32_t available = pFile->iSize - pFile->iPos;
 
-    if (iLen > available) iLen = available;
-    if (iLen <= 0) return 0;
+  if (iLen > available) iLen = available;
+  if (iLen <= 0) return 0;
 
-    memcpy(pBuf, buffer + pFile->iPos, iLen);
+  memcpy(pBuf, buffer + pFile->iPos, iLen);
 
-    pFile->iPos += iLen;
+  pFile->iPos += iLen;
 
-    return iLen;
+  return iLen;
 }
 
 static int32_t gifSeek(GIFFILE *pFile, int32_t iPosition) {
-    if (iPosition < 0 || iPosition > pFile->iSize)
-        return pFile->iPos;
+  if (iPosition < 0 || iPosition > pFile->iSize)
+      return pFile->iPos;
 
-    pFile->iPos = iPosition;
+  pFile->iPos = iPosition;
 
-    return pFile->iPos;
+  return pFile->iPos;
 }
 
 static void playGif(const char *path) {
@@ -91,8 +153,11 @@ static void playGif(const char *path) {
       return;
   }
 
+  // Center the GIF on the display depend on the GIF canvas size.
+  // offX and Y are the top left corner of the GIF on the display.
   offX = (int16_t)((tft.PANEL_W - gif.getCanvasWidth()) / 2);
   offY = (int16_t)((tft.PANEL_H - gif.getCanvasHeight()) / 2);
+  
   Serial.printf("%s  %dx%d\n", path, gif.getCanvasWidth(), gif.getCanvasHeight());
 
   int delayMs = 0;
@@ -106,7 +171,7 @@ static void playGif(const char *path) {
     int rc = gif.playFrame(false, &delayMs);
     if (rc < 0) break;
     const uint32_t playUs = micros() - t0;          // decode + read + GIFDraw
-    tft.display();
+    tft.present();
     const uint32_t pushUs = micros() - t0 - playUs; // panel transfer only
 
     const int32_t remainMs = delayMs - (int32_t)(playUs + pushUs) / 1000;
@@ -133,85 +198,19 @@ static void playGif(const char *path) {
   }
 }
 
-bool loadGifToPSRAM(const char *path) {
-    File file = SD.open(path, FILE_READ);
-
-    if (!file) {
-        Serial.println("Failed to open GIF");
-        return false;
-    }
-
-    gifBufferSize = file.size();
-
-    gifBuffer = (uint8_t *)heap_caps_malloc(
-        gifBufferSize,
-        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
-    );
-
-    if (!gifBuffer) {
-        Serial.println("PSRAM allocation failed");
-        file.close();
-        return false;
-    }
-
-    size_t bytesRead = file.read(gifBuffer, gifBufferSize);
-    file.close();
-
-    if (bytesRead != gifBufferSize) {
-        Serial.println("Incomplete GIF read");
-        heap_caps_free(gifBuffer);
-        gifBuffer = nullptr;
-        gifBufferSize = 0;
-        return false;
-    }
-
-    Serial.printf("GIF loaded: %u bytes\n", (unsigned int)gifBufferSize);
-
-    return true;
-}
-
-void sd_setup() {
-  delay(1000); // Wait for  Serial to initialize
-  Serial.print("Initializing SD card...");
-  sdSPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
-
-  if (!SD.begin(SD_CS, sdSPI, 40000000)) { // 40 MHz
-       Serial.println("SD card initialisation failed");
-      while (true) {delay(1000);}
-  }
-  else{
-       Serial.println("SD card ready");
-  }
-}
-
-void tft_setup() {
-  ST77916_QSPI_GFX::Config cfg;
-  cfg.clockHz = 70000000;                 // 70 MHz
-  cfg.pushTask = true;                   // transmit on the other core
-
-  if (!tft.begin(cfg)) {
-    Serial.printf("TFT error: %s\n", tft.lastError());
-    while (true) delay(1000);
-  }
-  else{
-    Serial.printf("display %dx%d\n", tft.PANEL_W, tft.PANEL_H);
-  }
-}
-
 void setup() {
-    Serial.begin(115200);
-    sd_setup();
-    tft_setup();
+  Serial.begin(115200);
+  sd_setup();
+  tft_setup();
 
-    gif.begin(GIF_PALETTE_RGB565_BE);
+  gif.begin(GIF_PALETTE_RGB565_BE);
 
-  if (!loadGifToPSRAM("/30fps.gif")) {
+  if (!loadGifToPSRAM("/sample-butter.gif")) {
       Serial.println("GIF loading failed");
       while (true) delay(1000);
   }
 }
 
-
 void loop() {
-    playGif("/30fps.gif");
+  playGif("/sample-butter.gif");
 }
