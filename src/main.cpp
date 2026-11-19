@@ -4,6 +4,7 @@
 #include <SPI.h>
 #include <SD.h>
 #include "esp_heap_caps.h"
+#include "esp_pm.h"
 
 // Pin definitions for the SD card
 #define SD_SCK  10
@@ -54,8 +55,6 @@ void sd_setup() {
 void tft_setup() {
   ST77916_QSPI_GFX::Config cfg;
   cfg.clockHz = 40000000;                 // 40 MHz
-  cfg.pushTask = false;                   // keep this false, otherwise screen flickers
-  cfg.doubleBuffer = true;
 
   if (!tft.begin(cfg)) {
     Serial.printf("TFT error: %s\n", tft.lastError());
@@ -175,7 +174,13 @@ static void playGif(const char *path) {
     const uint32_t pushUs = micros() - t0 - playUs; // panel transfer only
 
     const int32_t remainMs = delayMs - (int32_t)(playUs + pushUs) / 1000;
-    if (remainMs > 0) delay(remainMs);
+    if (remainMs > 0) {
+        uint32_t waitUntil = micros() + remainMs * 1000;
+
+        while ((int32_t)(micros() - waitUntil) < 0) {
+            taskYIELD();
+        }
+    }
 
     frames++;
     playSum  += playUs;
@@ -205,12 +210,12 @@ void setup() {
 
   gif.begin(GIF_PALETTE_RGB565_BE);
 
-  if (!loadGifToPSRAM("/sample-butter.gif")) {
+  if (!loadGifToPSRAM("/butter-flickering.gif")) {
       Serial.println("GIF loading failed");
       while (true) delay(1000);
   }
 }
 
 void loop() {
-  playGif("/sample-butter.gif");
+  playGif("/butter-flickering.gif");
 }
