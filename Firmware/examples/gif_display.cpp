@@ -7,10 +7,10 @@
 #include "esp_pm.h"
 
 // Pin definitions for the SD card
-#define SD_SPI_MISO  1
-#define SD_SPI_SCK   2
-#define SD_SPI_CS    41
-#define SD_SPI_MOSI  42
+#define SPI_MISO  1
+#define SPI_SCK   2
+#define SPI_CS    41
+#define SPI_MOSI  42
 
 // Pin definitions for the ST77916 display
 #define DP_QSPI_CS   40
@@ -40,9 +40,9 @@ static size_t gifBufferSize = 0;
 void sd_setup() {
   delay(1000); // Wait for  Serial to initialize
   Serial.print("Initializing SD card...");
-  sdSPI.begin(SD_SPI_SCK, SD_SPI_MISO, SD_SPI_MOSI, SD_SPI_CS);
+  sdSPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI, SPI_CS);
 
-  if (!SD.begin(SD_SPI_CS, sdSPI, 40000000)) { // 40 MHz
+  if (!SD.begin(SPI_CS, sdSPI, 40000000)) { // 40 MHz
        Serial.println("SD card initialisation failed");
       while (true) {delay(1000);}
   }

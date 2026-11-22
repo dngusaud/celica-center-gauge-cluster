@@ -2,10 +2,10 @@
 #include <SPI.h>
 #include <SD.h>
 
-#define SD_SPI_MISO  1
-#define SD_SPI_SCK   2
-#define SD_SPI_CS    41
-#define SD_SPI_MOSI  42
+#define SPI_MISO  1
+#define SPI_SCK   2
+#define SPI_CS    41
+#define SPI_MOSI  42
 
 SPIClass sdSPI(FSPI);
 
@@ -13,9 +13,9 @@ void setup()
 {
     Serial.begin(115200);
     Serial.print("Initializing SD card...");
-    sdSPI.begin(SD_SPI_SCK, SD_SPI_MISO, SD_SPI_MOSI, SD_SPI_CS);
+    sdSPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI, SPI_CS);
 
-    if (!SD.begin(SD_SPI_CS, sdSPI, 20000000))
+    if (!SD.begin(SPI_CS, sdSPI, 20000000))
     {
         Serial.println("SD card initialisation failed");
     }
