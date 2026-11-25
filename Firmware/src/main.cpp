@@ -3,117 +3,285 @@
 #include <SPI.h>
 #include <SD.h>
 
-// SD card SPI pins
+// ---- SD card configuration -------------------------------------------
+
 #define SPI_MISO  1
 #define SPI_SCK   2
 #define SPI_CS    41
 #define SPI_MOSI  42
 
-// ADC1 pins on ESP32-S3
-#define ADC_PIN_1  4
-#define ADC_PIN_2  5
-
-#define SAMPLE_INTERVAL_US 1000  // Target 1 kHz
-#define ADC_RESOLUTION 12
-#define ADC_MAX_VALUE  ((1UL << ADC_RESOLUTION) - 1)
-#define ADC_REFERENCE_mV 3300
+#define SD_SPI_FREQUENCY  40000000
+#define LOG_FILENAME      "/datalog.csv"
+#define FLUSH_INTERVAL_MS 1000
 
 SPIClass sdSPI(HSPI);
 File logFile;
 
-uint32_t lastSampleTime = 0;
-uint32_t lastFlushTime = 0;
-uint32_t sampleCount = 0;
+// ---- ADC configuration -----------------------------------------------
 
-// ---- Set up functions ----------------------------------------------------------
-void sd_setup() {
-  Serial.print("Initializing SD card...");
-  sdSPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI, SPI_CS);
+#define ADC_CHANNELS       4
+#define ADC_RESOLUTION     12
+#define ADC_MAX_VALUE      ((1UL << ADC_RESOLUTION) - 1)
+#define ADC_REFERENCE_mV   3300
 
-  if (!SD.begin(SPI_CS, sdSPI, 40000000)) { // 40 MHz
-       Serial.println("SD card initialisation failed");
-      while (true) {delay(1000);}
-  }
-  else{
-       Serial.println("SD card ready");
-  }
-}
+const uint8_t ADC_PINS[ADC_CHANNELS] = {
+    4, 5, 6, 7
+};
+
+// Independent frequency for each channel
+const uint16_t ADC_FREQUENCY[ADC_CHANNELS] = {
+    1000, 200, 50, 10
+};
+
+// ---- Timer configuration ---------------------------------------------
+
+#define TIMER_FREQUENCY_HZ  1000
+#define TIMER_INTERVAL_US   1000
+
+hw_timer_t *loggerTimer = NULL;
+
+// ---- Sampling event queue --------------------------------------------
+
+struct SampleEvent {
+    uint32_t timestamp;
+    uint8_t mask;
+};
+
+QueueHandle_t sampleQueue = NULL;
+
+uint16_t sampleInterval[ADC_CHANNELS];
+
+// ---- Conversion -------------------------------------------------------
 
 uint16_t adc_to_mV(uint16_t adcValue) {
-    return (uint32_t)adcValue * ADC_REFERENCE_mV / ADC_MAX_VALUE;
+
+    return (uint32_t)adcValue *
+           ADC_REFERENCE_mV / ADC_MAX_VALUE;
+}
+
+// ---- SD setup ---------------------------------------------------------
+
+void sd_setup() {
+
+    sdSPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI, SPI_CS);
+
+    if (!SD.begin(SPI_CS, sdSPI, SD_SPI_FREQUENCY)) {
+        Serial.println("SD card initialisation failed!");
+        while (true) delay(1000);
+    }
+
+    logFile = SD.open(LOG_FILENAME, FILE_APPEND);
+
+    if (!logFile) {
+        Serial.println("Failed to open log file!");
+        while (true) delay(1000);
+    }
+
+    if (logFile.size() == 0) {
+
+        logFile.println(
+            "timestamp_ms,adc1_mV,adc2_mV,adc3_mV,adc4_mV"
+        );
+
+        logFile.flush();
+    }
+
+    Serial.println("SD card ready");
 }
 
 // ---- Logger setup -----------------------------------------------------
 
 void logger_setup() {
+
     analogReadResolution(ADC_RESOLUTION);
 
-    logFile = SD.open("/datalog.csv", FILE_APPEND);
+    // Calculate sampling intervals
+    for (int i = 0; i < ADC_CHANNELS; i++) {
 
-    if (!logFile) {
-        Serial.println("Failed to open datalog.csv");
-        while (true) {
-            delay(1000);
+        if (ADC_FREQUENCY[i] == 0 ||
+            TIMER_FREQUENCY_HZ % ADC_FREQUENCY[i] != 0) {
+
+            Serial.println("Invalid ADC sampling frequency!");
+            while (true) delay(1000);
         }
+
+        sampleInterval[i] =
+            TIMER_FREQUENCY_HZ / ADC_FREQUENCY[i];
     }
 
-    if (logFile.size() == 0) {
-        logFile.println("timestamp_ms,adc1(mV),adc2(mV)");
-        logFile.flush();
+    // Create sampling event queue
+    sampleQueue = xQueueCreate(2048, sizeof(SampleEvent));
+
+    if (sampleQueue == NULL) {
+        Serial.println("Failed to create sample queue!");
+        while (true) delay(1000);
     }
 
-    lastSampleTime = micros();
-    lastFlushTime = millis();
     Serial.println("Logger ready");
 }
 
-void logger_loop() {
-    uint32_t now = micros();
+// ---- Timer interrupt --------------------------------------------------
 
-    if ((uint32_t)(now - lastSampleTime) >= SAMPLE_INTERVAL_US) {
-        lastSampleTime += SAMPLE_INTERVAL_US;
-        uint32_t timestamp = millis();
-        uint16_t adc1 = analogRead(ADC_PIN_1);
-        uint16_t adc2 = analogRead(ADC_PIN_2);
-        size_t written = logFile.printf("%lu,%u,%u\n", timestamp, adc_to_mV(adc1), adc_to_mV(adc2));
+void IRAM_ATTR logger_timer_isr() {
 
-        if (written == 0) {
-            Serial.println("SD write failed!");
-        }
+    static uint32_t ticks = 0;
 
-        sampleCount++;
+    BaseType_t higherPriorityTaskWoken = pdFALSE;
 
-        if (sampleCount % 1000 == 0) {
-            Serial.printf(
-                "Samples: %lu | ADC1: %u | ADC2: %u\n",
-                sampleCount,
-                adc1,
-                adc2
-            );
+    ticks++;
+
+    uint8_t mask = 0;
+
+    for (int i = 0; i < ADC_CHANNELS; i++) {
+
+        if (ticks % sampleInterval[i] == 0) {
+            mask |= (1 << i);
         }
     }
 
-    // Flush every second
-    if (millis() - lastFlushTime >= 1000) {
-        logFile.flush();
-        lastFlushTime = millis();
+    if (mask != 0) {
+
+        SampleEvent event = {
+            .timestamp = ticks,
+            .mask = mask
+        };
+
+        xQueueSendFromISR(
+            sampleQueue,
+            &event,
+            &higherPriorityTaskWoken
+        );
+    }
+
+    if (higherPriorityTaskWoken) {
+        portYIELD_FROM_ISR();
     }
 }
+
+// ---- Timer start ------------------------------------------------------
+
+void logger_timer_start() {
+
+    // 80 MHz / 80 = 1 MHz timer clock
+    loggerTimer = timerBegin(0, 80, true);
+
+    if (loggerTimer == NULL) {
+        Serial.println("Timer initialisation failed!");
+        while (true) delay(1000);
+    }
+
+    timerAttachInterrupt(
+        loggerTimer,
+        &logger_timer_isr,
+        true
+    );
+
+    timerAlarmWrite(
+        loggerTimer,
+        TIMER_INTERVAL_US,
+        true
+    );
+
+    timerAlarmEnable(loggerTimer);
+
+    Serial.println("Logger timer started");
+}
+
+// ---- Logger task ------------------------------------------------------
 
 void logger_task(void *parameter) {
-    while (true) {
-        logger_loop();
 
-        taskYIELD();
+    SampleEvent event;
+
+    uint32_t lastFlushTime = millis();
+
+    while (true) {
+
+        if (xQueueReceive(
+            sampleQueue,
+            &event,
+            pdMS_TO_TICKS(10)
+        ) == pdTRUE) {
+
+            uint16_t adcValues[ADC_CHANNELS] = {0};
+
+            // Read scheduled ADC channels
+            for (int i = 0; i < ADC_CHANNELS; i++) {
+
+                if (event.mask & (1 << i)) {
+
+                    adcValues[i] = adc_to_mV(
+                        analogRead(ADC_PINS[i])
+                    );
+                }
+            }
+
+            // Prepare CSV fields
+            char fields[ADC_CHANNELS][12];
+
+            for (int i = 0; i < ADC_CHANNELS; i++) {
+
+                if (event.mask & (1 << i)) {
+
+                    snprintf(
+                        fields[i],
+                        sizeof(fields[i]),
+                        "%u",
+                        adcValues[i]
+                    );
+                }
+                else {
+                    fields[i][0] = '\0';
+                }
+            }
+
+            // Write CSV record
+            logFile.printf(
+                "%lu,%s,%s,%s,%s\n",
+                event.timestamp,
+                fields[0],
+                fields[1],
+                fields[2],
+                fields[3]
+            );
+        }
+
+        // Flush SD card periodically
+        if (millis() - lastFlushTime >= FLUSH_INTERVAL_MS) {
+
+            logFile.flush();
+
+            lastFlushTime = millis();
+        }
     }
 }
 
+// ---- Logger start -----------------------------------------------------
 
 void logger_start() {
-    xTaskCreatePinnedToCore(logger_task,"ADC Logger",4096,NULL,2,NULL,1);
+
+    BaseType_t result = xTaskCreatePinnedToCore(
+        logger_task,
+        "ADC Logger",
+        4096,
+        NULL,
+        2,
+        NULL,
+        1
+    );
+
+    if (result != pdPASS) {
+        Serial.println("Logger task creation failed!");
+        while (true) delay(1000);
+    }
+
+    logger_timer_start();
 }
 
+// ---- Arduino setup ----------------------------------------------------
+
 void setup() {
+
     Serial.begin(115200);
     delay(1000);
 
