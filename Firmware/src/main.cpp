@@ -14,6 +14,18 @@
 #define LOG_FILENAME      "/datalog.csv"
 #define FLUSH_INTERVAL_MS 1000
 
+// ---- Button / status LED configuration --------------------------------
+
+#define BUTTON_PIN            18
+#define BUTTON_DEBOUNCE_MS    50
+
+#define STATUS_LED_PIN        PIN_NEOPIXEL   // GPIO48, onboard WS2812
+#define STATUS_LED_BRIGHTNESS 64             // 0-255 (~25%)
+
+// ---- Logging state ----------------------------------------------------
+
+volatile bool loggingEnabled = false;        // starts disabled
+
 SPIClass sdSPI(HSPI);
 File logFile;
 
@@ -57,6 +69,64 @@ uint16_t adc_to_mV(uint16_t adcValue) {
 
     return (uint32_t)adcValue *
            ADC_REFERENCE_mV / ADC_MAX_VALUE;
+}
+
+// ---- Button and status LED --------------------------------------------
+
+void status_led_update() {
+
+    neopixelWrite(
+        STATUS_LED_PIN,
+        0,
+        loggingEnabled ? STATUS_LED_BRIGHTNESS : 0,
+        0
+    );
+}
+
+void button_setup() {
+
+    pinMode(BUTTON_PIN, INPUT);   // external pull-up fitted
+}
+
+void button_poll() {
+
+    static bool stable = HIGH;
+    static bool reading = HIGH;
+    static uint32_t changedAt = 0;
+    static bool initialized = false;
+
+    if (!initialized) {
+
+        stable = reading = digitalRead(BUTTON_PIN);
+        changedAt = millis();
+        initialized = true;
+    }
+
+    bool now = digitalRead(BUTTON_PIN);
+
+    if (now != reading) {
+
+        reading = now;
+        changedAt = millis();
+    }
+
+    if (millis() - changedAt >= BUTTON_DEBOUNCE_MS &&
+        reading != stable) {
+
+        stable = reading;
+
+        if (stable == LOW) {          // press = active LOW
+
+            loggingEnabled = !loggingEnabled;
+
+            status_led_update();
+
+            Serial.printf(
+                "Logging %s\n",
+                loggingEnabled ? "ENABLED" : "DISABLED"
+            );
+        }
+    }
 }
 
 // ---- SD setup ---------------------------------------------------------
@@ -130,6 +200,10 @@ void IRAM_ATTR logger_timer_isr() {
 
     ticks++;
 
+    if (!loggingEnabled) {
+        return;
+    }
+
     uint8_t mask = 0;
 
     for (int i = 0; i < ADC_CHANNELS; i++) {
@@ -195,13 +269,15 @@ void logger_task(void *parameter) {
 
     uint32_t lastFlushTime = millis();
 
+    bool dirty = false;
+
     while (true) {
 
         if (xQueueReceive(
             sampleQueue,
             &event,
             pdMS_TO_TICKS(10)
-        ) == pdTRUE) {
+        ) == pdTRUE && loggingEnabled) {
 
             uint16_t adcValues[ADC_CHANNELS] = {0};
 
@@ -244,12 +320,17 @@ void logger_task(void *parameter) {
                 fields[2],
                 fields[3]
             );
+
+            dirty = true;
         }
 
-        // Flush SD card periodically
-        if (millis() - lastFlushTime >= FLUSH_INTERVAL_MS) {
+        // Flush when disabled or periodically while logging
+        if (dirty && (!loggingEnabled ||
+            millis() - lastFlushTime >= FLUSH_INTERVAL_MS)) {
 
             logFile.flush();
+
+            dirty = false;
 
             lastFlushTime = millis();
         }
@@ -285,11 +366,16 @@ void setup() {
     Serial.begin(115200);
     delay(1000);
 
+    button_setup();
+    status_led_update();     // LED off, logging disabled
+
     sd_setup();
     logger_setup();
     logger_start();
 }
 
 void loop() {
-    delay(1);
+
+    button_poll();
+    delay(5);
 }
